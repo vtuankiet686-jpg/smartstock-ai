@@ -2,6 +2,7 @@ import os
 import math
 import warnings
 from dataclasses import dataclass
+from io import StringIO
 
 import numpy as np
 import pandas as pd
@@ -13,13 +14,10 @@ from sklearn.linear_model import LinearRegression
 
 warnings.filterwarnings("ignore")
 
-# =========================
-# CẤU HÌNH CHUNG
-# =========================
 CSV_PATH = "sales_data.csv"
 MODEL_LOOKBACK = 14
 DEFAULT_LEAD_TIME = 7
-DEFAULT_SERVICE_LEVEL_Z = 1.65  # ~95%
+DEFAULT_SERVICE_LEVEL_Z = 1.65
 RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
 
@@ -33,15 +31,7 @@ class InventoryResult:
     eoq: float
 
 
-# =========================
-# TẠO DỮ LIỆU MẪU NẾU CHƯA CÓ FILE
-# =========================
 def create_sample_data(path: str = CSV_PATH, days: int = 365) -> pd.DataFrame:
-    """
-    Tạo dữ liệu mẫu nếu chưa có sales_data.csv
-    Cấu trúc file:
-    date, sales, temperature, holiday
-    """
     dates = pd.date_range(start="2025-01-01", periods=days, freq="D")
 
     trend = np.linspace(120, 170, days)
@@ -67,14 +57,7 @@ def create_sample_data(path: str = CSV_PATH, days: int = 365) -> pd.DataFrame:
     return df
 
 
-# =========================
-# ĐỌC DỮ LIỆU
-# =========================
-def load_data(path: str = CSV_PATH) -> pd.DataFrame:
-    if not os.path.exists(path):
-        return create_sample_data(path)
-
-    df = pd.read_csv(path)
+def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     required_cols = {"date", "sales"}
     if not required_cols.issubset(df.columns):
         raise ValueError("File CSV phải có ít nhất 2 cột: date, sales")
@@ -84,14 +67,39 @@ def load_data(path: str = CSV_PATH) -> pd.DataFrame:
     if "holiday" not in df.columns:
         df["holiday"] = 0
 
-    df["date"] = pd.to_datetime(df["date"])
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["sales"] = pd.to_numeric(df["sales"], errors="coerce")
+    df["temperature"] = pd.to_numeric(df["temperature"], errors="coerce").fillna(30)
+    df["holiday"] = pd.to_numeric(df["holiday"], errors="coerce").fillna(0)
+
+    df = df.dropna(subset=["date", "sales"]).copy()
     df = df.sort_values("date").reset_index(drop=True)
+
+    if len(df) < 20:
+        raise ValueError("CSV cần tối thiểu khoảng 20 dòng dữ liệu hợp lệ để chạy dự báo.")
+
     return df
 
 
-# =========================
-# TIỀN XỬ LÝ
-# =========================
+def load_data_from_path(path: str = CSV_PATH) -> pd.DataFrame:
+    if not os.path.exists(path):
+        return create_sample_data(path)
+
+    df = pd.read_csv(path)
+    return normalize_dataframe(df)
+
+
+def load_data_from_upload(uploaded_file) -> pd.DataFrame:
+    if uploaded_file is None:
+        return load_data_from_path(CSV_PATH)
+
+    try:
+        df = pd.read_csv(uploaded_file)
+        return normalize_dataframe(df)
+    except Exception as e:
+        raise ValueError(f"Không đọc được file upload: {e}")
+
+
 def make_features(df: pd.DataFrame) -> pd.DataFrame:
     data = df.copy()
     data["day_of_week"] = data["date"].dt.dayofweek
@@ -108,9 +116,6 @@ def create_sequences(feature_array: np.ndarray, target_array: np.ndarray, lookba
     return np.array(X), np.array(y)
 
 
-# =========================
-# TRAIN MODEL DỰ BÁO
-# =========================
 def train_forecast_model(df: pd.DataFrame, lookback: int = MODEL_LOOKBACK):
     data = make_features(df)
 
@@ -129,7 +134,6 @@ def train_forecast_model(df: pd.DataFrame, lookback: int = MODEL_LOOKBACK):
     if len(X) < 10:
         raise ValueError("Dữ liệu quá ít để train model. Hãy tăng số dòng dữ liệu.")
 
-    # Đổi từ 3D sang 2D để dùng LinearRegression
     X_flat = X.reshape(X.shape[0], -1)
     y_flat = y.ravel()
 
@@ -161,9 +165,6 @@ def train_forecast_model(df: pd.DataFrame, lookback: int = MODEL_LOOKBACK):
     }
 
 
-# =========================
-# DỰ BÁO TƯƠNG LAI
-# =========================
 def forecast_next_days(train_result: dict, days_ahead: int = 7) -> pd.DataFrame:
     model = train_result["model"]
     data = train_result["data"].copy()
@@ -211,9 +212,6 @@ def forecast_next_days(train_result: dict, days_ahead: int = 7) -> pd.DataFrame:
     return forecast_df
 
 
-# =========================
-# TÍNH INVENTORY METRICS
-# =========================
 def calculate_inventory_metrics(
     historical_sales: pd.Series,
     forecast_sales: pd.Series,
@@ -240,9 +238,6 @@ def calculate_inventory_metrics(
     )
 
 
-# =========================
-# BIỂU ĐỒ
-# =========================
 def plot_actual_vs_forecast(df: pd.DataFrame, forecast_df: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(10, 4))
     tail_df = df.tail(60)
@@ -268,9 +263,10 @@ def plot_train_result(y_true, y_pred):
     st.pyplot(fig)
 
 
-# =========================
-# GIAO DIỆN STREAMLIT
-# =========================
+def convert_df_to_csv(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
+
+
 def main():
     st.set_page_config(page_title="SmartStock AI Demo", layout="wide")
     st.title("SmartStock AI – Dự báo nhu cầu và quản trị tồn kho")
@@ -284,18 +280,29 @@ def main():
     order_cost = st.sidebar.number_input("Chi phí mỗi lần đặt hàng", value=500000, step=50000)
     holding_cost = st.sidebar.number_input("Chi phí lưu kho / đơn vị / năm", value=12000, step=1000)
 
+    st.subheader("1) Upload dữ liệu CSV")
+    uploaded_file = st.file_uploader(
+        "Tải file CSV của bạn lên",
+        type=["csv"],
+        help="CSV tối thiểu cần có cột: date, sales. Có thể thêm temperature, holiday."
+    )
+
     st.info(
-        "Nếu chưa có file sales_data.csv, chương trình sẽ tự tạo dữ liệu mẫu để bạn demo ngay. "
-        "Khi có dữ liệu thật, chỉ cần thay file CSV bằng dữ liệu của nhóm."
+        "Nếu bạn không upload file, app sẽ dùng sales_data.csv trong project hoặc tự tạo dữ liệu mẫu."
     )
 
     try:
-        df = load_data(CSV_PATH)
+        df = load_data_from_upload(uploaded_file)
     except Exception as e:
         st.error(f"Lỗi đọc dữ liệu: {e}")
         return
 
-    st.subheader("1) Dữ liệu đầu vào")
+    if uploaded_file is not None:
+        st.success(f"Đã tải file: {uploaded_file.name}")
+    else:
+        st.warning("Chưa upload file. App đang dùng dữ liệu có sẵn hoặc dữ liệu mẫu.")
+
+    st.subheader("2) Xem dữ liệu đầu vào")
     st.dataframe(df.tail(10), use_container_width=True)
 
     with st.spinner("Đang train mô hình dự báo..."):
@@ -316,7 +323,7 @@ def main():
         holding_cost=holding_cost,
     )
 
-    st.subheader("2) Kết quả chính")
+    st.subheader("3) Kết quả chính")
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("MAPE", f"{result['mape']:.2f}%")
     c2.metric("Nhu cầu TB/ngày", f"{inv.avg_daily_demand:.0f}")
@@ -324,16 +331,23 @@ def main():
     c4.metric("Reorder Point", f"{inv.reorder_point:.0f}")
     c5.metric("EOQ", f"{inv.eoq:.0f}")
 
-    st.subheader("3) Bảng dự báo")
+    st.subheader("4) Bảng dự báo")
     display_forecast = forecast_df.copy()
     display_forecast["sales"] = display_forecast["sales"].round(0).astype(int)
     st.dataframe(display_forecast, use_container_width=True)
 
-    st.subheader("4) Biểu đồ")
+    st.download_button(
+        label="Tải kết quả dự báo xuống CSV",
+        data=convert_df_to_csv(display_forecast),
+        file_name="forecast_result.csv",
+        mime="text/csv"
+    )
+
+    st.subheader("5) Biểu đồ")
     plot_actual_vs_forecast(df, forecast_df)
     plot_train_result(result["y_true"], result["y_pred"])
 
-    st.subheader("5) Giải thích nhanh để thuyết trình")
+    st.subheader("6) Giải thích nhanh")
     st.markdown(
         f"""
 **Mô hình dùng gì?**  
@@ -350,7 +364,7 @@ def main():
         """
     )
 
-    st.subheader("6) Mẫu dữ liệu CSV cần chuẩn bị")
+    st.subheader("7) Mẫu CSV hợp lệ")
     st.code(
         "date,sales,temperature,holiday\n"
         "2025-01-01,120,30,0\n"
@@ -359,7 +373,7 @@ def main():
         language="csv",
     )
 
-    st.success("Xong. Bạn có thể dùng bản này để demo ý tưởng cho nhóm trước, rồi nâng cấp bằng dữ liệu thật sau.")
+    st.success("Xong. Bạn có thể upload CSV trực tiếp trên web rồi chạy dự báo.")
 
 
 if __name__ == "__main__":
