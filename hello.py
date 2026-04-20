@@ -2,12 +2,12 @@ import os
 import math
 import warnings
 from dataclasses import dataclass
-from io import StringIO
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_percentage_error
 from sklearn.linear_model import LinearRegression
@@ -238,30 +238,144 @@ def calculate_inventory_metrics(
     )
 
 
-def plot_actual_vs_forecast(df: pd.DataFrame, forecast_df: pd.DataFrame):
-    fig, ax = plt.subplots(figsize=(10, 4))
-    tail_df = df.tail(60)
-    ax.plot(tail_df["date"], tail_df["sales"], label="Lịch sử bán hàng")
-    ax.plot(forecast_df["date"], forecast_df["sales"], label="Dự báo")
-    ax.set_title("Nhu cầu lịch sử và dự báo")
-    ax.set_xlabel("Ngày")
-    ax.set_ylabel("Số lượng")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    st.pyplot(fig)
+def evaluate_inventory_status(current_stock: float, inv: InventoryResult, forecast_df: pd.DataFrame):
+    next_7_days_demand = float(forecast_df["sales"].sum())
+    stock_gap_vs_rop = current_stock - inv.reorder_point
+    suggested_order_qty = max(0, math.ceil(inv.eoq if current_stock < inv.reorder_point else 0))
 
+    if current_stock < inv.safety_stock:
+        status = "Nguy hiểm"
+        priority = "Cao"
+        color = "error"
+        message = "Tồn kho hiện tại thấp hơn mức tồn kho an toàn. Nguy cơ thiếu hàng rất cao."
+    elif current_stock < inv.reorder_point:
+        status = "Cần nhập hàng"
+        priority = "Trung bình"
+        color = "warning"
+        message = "Tồn kho hiện tại đã thấp hơn điểm đặt hàng lại. Nên lên đơn nhập thêm."
+    elif current_stock > next_7_days_demand * 1.5 + inv.safety_stock:
+        status = "Nguy cơ dư hàng"
+        priority = "Trung bình"
+        color = "warning"
+        message = "Tồn kho hiện tại khá cao so với nhu cầu dự báo. Có nguy cơ dư hàng hoặc quay vòng chậm."
+    else:
+        status = "An toàn"
+        priority = "Thấp"
+        color = "success"
+        message = "Tồn kho đang ở mức hợp lý so với nhu cầu dự báo."
+
+    return {
+        "status": status,
+        "priority": priority,
+        "color": color,
+        "message": message,
+        "next_7_days_demand": next_7_days_demand,
+        "stock_gap_vs_rop": stock_gap_vs_rop,
+        "suggested_order_qty": suggested_order_qty,
+        "days_of_cover": current_stock / inv.avg_daily_demand if inv.avg_daily_demand > 0 else 0,
+    }
+
+def plot_actual_vs_forecast(df: pd.DataFrame, forecast_df: pd.DataFrame):
+    tail_df = df.tail(30).copy()
+    forecast_df = forecast_df.copy()
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=tail_df["date"],
+        y=tail_df["sales"],
+        mode="lines+markers",
+        name="Lịch sử bán hàng",
+        line=dict(width=3, color="#1f77b4"),
+        marker=dict(size=8, color="#1f77b4")
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=forecast_df["date"],
+        y=forecast_df["sales"],
+        mode="lines+markers",
+        name="Dự báo",
+        line=dict(width=3, dash="dash", color="#ff7f0e"),
+        marker=dict(size=8, color="#ff7f0e")
+    ))
+
+    if len(forecast_df) > 0:
+        fig.add_annotation(
+            x=forecast_df["date"].iloc[0],
+            y=max(
+                float(tail_df["sales"].max()) if len(tail_df) > 0 else 0,
+                float(forecast_df["sales"].max()) if len(forecast_df) > 0 else 0
+            ),
+            text="Bắt đầu dự báo",
+            showarrow=True,
+            arrowhead=2,
+            font=dict(size=13),
+            yshift=10
+        )
+
+    fig.update_layout(
+        title="Xu hướng bán hàng 30 ngày gần nhất và dự báo",
+        xaxis_title="Ngày",
+        yaxis_title="Số lượng",
+        hovermode="x unified",
+        title_font=dict(size=22),
+        font=dict(size=14),
+        legend=dict(font=dict(size=13)),
+        xaxis=dict(
+            tickfont=dict(size=13),
+            title_font=dict(size=15)
+        ),
+        yaxis=dict(
+            tickfont=dict(size=13),
+            title_font=dict(size=15)
+        )
+    )
+
+    st.plotly_chart(fig, use_container_width=True, theme="streamlit")
 
 def plot_train_result(y_true, y_pred):
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(y_true, label="Thực tế")
-    ax.plot(y_pred, label="Dự đoán")
-    ax.set_title("Kết quả dự đoán trên tập test")
-    ax.set_xlabel("Mốc thời gian")
-    ax.set_ylabel("Sales")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    st.pyplot(fig)
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
 
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=list(range(len(y_true))),
+        y=y_true,
+        mode="lines+markers",
+        name="Thực tế",
+        line=dict(width=3, color="#2ca02c"),
+        marker=dict(size=7, color="#2ca02c")
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=list(range(len(y_pred))),
+        y=y_pred,
+        mode="lines+markers",
+        name="Dự đoán",
+        line=dict(width=3, dash="dash", color="#d62728"),
+        marker=dict(size=7, color="#d62728")
+    ))
+
+    fig.update_layout(
+        title="So sánh dữ liệu thực tế và dự đoán trên tập test",
+        xaxis_title="Mốc thời gian",
+        yaxis_title="Sales",
+        hovermode="x unified",
+        title_font=dict(size=22),
+        font=dict(size=14),
+        legend=dict(font=dict(size=13)),
+        xaxis=dict(
+            tickfont=dict(size=13),
+            title_font=dict(size=15)
+        ),
+        yaxis=dict(
+            tickfont=dict(size=13),
+            title_font=dict(size=15)
+        )
+    )
+
+    st.plotly_chart(fig, use_container_width=True, theme="streamlit")
 
 def convert_df_to_csv(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
@@ -270,7 +384,7 @@ def convert_df_to_csv(df: pd.DataFrame) -> bytes:
 def main():
     st.set_page_config(page_title="SmartStock AI Demo", layout="wide")
     st.title("SmartStock AI – Dự báo nhu cầu và quản trị tồn kho")
-    st.caption("Demo cho đề tài logistics: Forecasting + Safety Stock + Reorder Point + EOQ")
+    st.caption("Demo cho đề tài logistics: Forecasting + Smart Inventory Alert + EOQ")
 
     st.sidebar.header("Cấu hình mô phỏng")
     lookback = st.sidebar.slider("Số ngày nhìn lại (lookback)", 7, 30, 14)
@@ -287,9 +401,7 @@ def main():
         help="CSV tối thiểu cần có cột: date, sales. Có thể thêm temperature, holiday."
     )
 
-    st.info(
-        "Nếu bạn không upload file, app sẽ dùng sales_data.csv trong project hoặc tự tạo dữ liệu mẫu."
-    )
+    st.info("Nếu bạn không upload file, app sẽ dùng sales_data.csv trong project hoặc tự tạo dữ liệu mẫu.")
 
     try:
         df = load_data_from_upload(uploaded_file)
@@ -302,8 +414,23 @@ def main():
     else:
         st.warning("Chưa upload file. App đang dùng dữ liệu có sẵn hoặc dữ liệu mẫu.")
 
-    st.subheader("2) Xem dữ liệu đầu vào")
-    st.dataframe(df.tail(10), use_container_width=True)
+        st.subheader("2) Xem dữ liệu đầu vào")
+
+    with st.expander("Xem toàn bộ dữ liệu"):
+        st.dataframe(df, use_container_width=True)
+
+    with st.expander("Thống kê mô tả dữ liệu"):
+        st.dataframe(df.describe(include="all"), use_container_width=True)
+
+    missing_required = []
+    for col in ["date", "sales"]:
+        if col not in df.columns:
+            missing_required.append(col)
+
+    if missing_required:
+        st.error(f"Thiếu cột bắt buộc: {', '.join(missing_required)}")
+    else:
+        st.success("Dữ liệu đầu vào có đủ các cột bắt buộc: date, sales")
 
     with st.spinner("Đang train mô hình dự báo..."):
         try:
@@ -321,7 +448,7 @@ def main():
         z_value=z_value,
         order_cost=order_cost,
         holding_cost=holding_cost,
-    )
+    ) 
 
     st.subheader("3) Kết quả chính")
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -331,7 +458,35 @@ def main():
     c4.metric("Reorder Point", f"{inv.reorder_point:.0f}")
     c5.metric("EOQ", f"{inv.eoq:.0f}")
 
-    st.subheader("4) Bảng dự báo")
+    st.subheader("4) Cảnh báo tồn kho thông minh")
+    current_stock = st.number_input(
+        "Nhập mức tồn kho hiện tại",
+        min_value=0,
+        value=int(max(inv.reorder_point, inv.safety_stock) + 20),
+        step=10
+    )
+
+    alert = evaluate_inventory_status(current_stock, inv, forecast_df)
+
+    if alert["color"] == "error":
+        st.error(f"**{alert['status']}** — {alert['message']}")
+    elif alert["color"] == "warning":
+        st.warning(f"**{alert['status']}** — {alert['message']}")
+    else:
+        st.success(f"**{alert['status']}** — {alert['message']}")
+
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Mức ưu tiên", alert["priority"])
+    a2.metric("Số ngày đủ hàng", f"{alert['days_of_cover']:.1f} ngày")
+    a3.metric("Nhu cầu dự báo", f"{alert['next_7_days_demand']:.0f}")
+    a4.metric("Chênh lệch vs ROP", f"{alert['stock_gap_vs_rop']:.0f}")
+
+    if alert["suggested_order_qty"] > 0:
+        st.info(f"Gợi ý nhập thêm khoảng **{alert['suggested_order_qty']}** đơn vị theo EOQ.")
+    else:
+        st.info("Hiện chưa cần nhập thêm theo tín hiệu tồn kho hiện tại.")
+
+    st.subheader("5) Bảng dự báo")
     display_forecast = forecast_df.copy()
     display_forecast["sales"] = display_forecast["sales"].round(0).astype(int)
     st.dataframe(display_forecast, use_container_width=True)
@@ -343,28 +498,28 @@ def main():
         mime="text/csv"
     )
 
-    st.subheader("5) Biểu đồ")
+    st.subheader("6) Biểu đồ")
     plot_actual_vs_forecast(df, forecast_df)
     plot_train_result(result["y_true"], result["y_pred"])
 
-    st.subheader("6) Giải thích nhanh")
+    st.subheader("7) Giải thích nhanh")
     st.markdown(
         f"""
 **Mô hình dùng gì?**  
 - Dùng mô hình dự báo để học từ dữ liệu bán hàng lịch sử và dự báo nhu cầu trong **{forecast_days} ngày tới**.
 
-**Tồn kho an toàn tính sao?**  
-- Safety Stock = Z × độ lệch chuẩn nhu cầu × căn bậc hai của lead time.
-
-**Điểm đặt hàng lại là gì?**  
-- Reorder Point = nhu cầu trung bình × lead time + safety stock.
+**Cảnh báo thông minh hoạt động ra sao?**  
+- So sánh tồn kho hiện tại với **Safety Stock** và **Reorder Point**.  
+- Nếu dưới Safety Stock → cảnh báo nguy hiểm.  
+- Nếu dưới Reorder Point → gợi ý nhập hàng.  
+- Nếu tồn quá cao so với nhu cầu dự báo → cảnh báo dư hàng.
 
 **EOQ dùng để làm gì?**  
 - Ước lượng lượng đặt hàng kinh tế để giảm tổng chi phí đặt hàng và lưu kho.
         """
     )
 
-    st.subheader("7) Mẫu CSV hợp lệ")
+    st.subheader("8) Mẫu CSV hợp lệ")
     st.code(
         "date,sales,temperature,holiday\n"
         "2025-01-01,120,30,0\n"
@@ -372,8 +527,6 @@ def main():
         "2025-01-03,160,29,1",
         language="csv",
     )
-
-    st.success("Xong. Bạn có thể upload CSV trực tiếp trên web rồi chạy dự báo.")
 
 
 if __name__ == "__main__":
