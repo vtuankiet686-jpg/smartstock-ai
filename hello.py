@@ -400,7 +400,6 @@ def main():
         help="CSV tối thiểu cần có cột: date, sales. Có thể thêm temperature, holiday."
     )
 
-    st.info("Nếu bạn không upload file, app sẽ dùng sales_data.csv trong project hoặc tự tạo dữ liệu mẫu.")
 
     try:
         df = load_data_from_upload(uploaded_file)
