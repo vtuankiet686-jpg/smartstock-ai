@@ -384,7 +384,6 @@ def convert_df_to_csv(df: pd.DataFrame) -> bytes:
 def main():
     st.set_page_config(page_title="SmartStock AI Demo", layout="wide")
     st.title("SmartStock AI – Dự báo nhu cầu và quản trị tồn kho")
-    st.caption("Demo cho đề tài logistics: Forecasting + Smart Inventory Alert + EOQ")
 
     st.sidebar.header("Cấu hình mô phỏng")
     lookback = st.sidebar.slider("Số ngày nhìn lại (lookback)", 7, 30, 14)
