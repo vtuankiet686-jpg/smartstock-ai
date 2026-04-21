@@ -313,20 +313,31 @@ def plot_actual_vs_forecast(df: pd.DataFrame, forecast_df: pd.DataFrame):
         )
 
     fig.update_layout(
-        title="Xu hướng bán hàng 30 ngày gần nhất và dự báo",
+        title="Xu hướng bán hàng và dự báo",
         xaxis_title="Ngày",
         yaxis_title="Số lượng",
         hovermode="x unified",
-        title_font=dict(size=22),
-        font=dict(size=14),
-        legend=dict(font=dict(size=13)),
+        dragmode="pan",
+        title_font=dict(size=20),
+        font=dict(size=13),
+        height=500,
+        margin=dict(l=20, r=20, t=90, b=20),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=12)
+        ),
         xaxis=dict(
-            tickfont=dict(size=13),
-            title_font=dict(size=15)
+            tickfont=dict(size=12),
+            title_font=dict(size=14),
+            nticks=6
         ),
         yaxis=dict(
-            tickfont=dict(size=13),
-            title_font=dict(size=15)
+            tickfont=dict(size=12),
+            title_font=dict(size=14)
         )
     )
 
@@ -361,16 +372,27 @@ def plot_train_result(y_true, y_pred):
         xaxis_title="Mốc thời gian",
         yaxis_title="Sales",
         hovermode="x unified",
-        title_font=dict(size=22),
-        font=dict(size=14),
-        legend=dict(font=dict(size=13)),
+        dragmode="pan",
+        title_font=dict(size=20),
+        font=dict(size=13),
+        height=500,
+        margin=dict(l=20, r=20, t=90, b=20),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=12)
+        ),
         xaxis=dict(
-            tickfont=dict(size=13),
-            title_font=dict(size=15)
+            tickfont=dict(size=12),
+            title_font=dict(size=14),
+            nticks=8
         ),
         yaxis=dict(
-            tickfont=dict(size=13),
-            title_font=dict(size=15)
+            tickfont=dict(size=12),
+            title_font=dict(size=14)
         )
     )
 
