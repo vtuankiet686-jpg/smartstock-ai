@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_percentage_error
@@ -183,7 +182,7 @@ def forecast_next_days(train_result: dict, days_ahead: int = 7) -> pd.DataFrame:
 
         pred_scaled = model.predict(seq_flat).reshape(-1, 1)
         pred_sales = target_scaler.inverse_transform(pred_scaled)[0][0]
-        pred_sales = max(0, float(pred_sales))
+        pred_sales = max(20, float(pred_sales))
 
         next_date = recent_data["date"].max() + pd.Timedelta(days=1)
         next_day_of_week = next_date.dayofweek
@@ -412,7 +411,7 @@ def main():
     else:
         st.warning("Chưa upload file. App đang dùng dữ liệu có sẵn hoặc dữ liệu mẫu.")
 
-        st.subheader("2) Xem dữ liệu đầu vào")
+    st.subheader("2) Xem dữ liệu đầu vào")
 
     with st.expander("Xem toàn bộ dữ liệu"):
         st.dataframe(df, use_container_width=True)
