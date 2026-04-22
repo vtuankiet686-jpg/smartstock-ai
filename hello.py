@@ -405,14 +405,21 @@ def convert_df_to_csv(df: pd.DataFrame) -> bytes:
 def main():
     st.set_page_config(page_title="SmartStock AI Demo", layout="wide")
     st.title("SmartStock AI – Dự báo nhu cầu và quản trị tồn kho")
+    st.caption("Forecast và kết quả đánh giá được sinh từ mô hình TensorFlow LSTM (50 units) train trên Google Colab.")
 
     st.sidebar.header("Cấu hình mô phỏng")
     lookback = st.sidebar.slider("Số ngày nhìn lại (lookback)", 7, 30, 14)
     forecast_days = st.sidebar.slider("Số ngày muốn dự báo", 7, 30, 7)
+    st.sidebar.caption("Số ngày forecast thực tế phụ thuộc file kết quả LSTM hiện tại từ Colab.")
     lead_time_days = st.sidebar.slider("Lead time (ngày)", 1, 30, 7)
     z_value = st.sidebar.selectbox("Mức độ an toàn (Z-score)", [1.28, 1.65, 1.96, 2.33], index=1)
     order_cost = st.sidebar.number_input("Chi phí mỗi lần đặt hàng", value=500000, step=50000)
     holding_cost = st.sidebar.number_input("Chi phí lưu kho / đơn vị / năm", value=12000, step=1000)
+    scenario = st.sidebar.selectbox(
+        "Kịch bản mô phỏng",
+        ["Bình thường", "Tết", "Mưa lũ HCMC"],
+        index=0
+)
 
     st.subheader("1) Upload dữ liệu CSV")
     uploaded_file = st.file_uploader(
@@ -433,6 +440,8 @@ def main():
     else:
         st.warning("Chưa upload file. App đang dùng dữ liệu có sẵn hoặc dữ liệu mẫu.")
 
+    using_uploaded_data = uploaded_file is not None
+
     st.subheader("2) Xem dữ liệu đầu vào")
 
     with st.expander("Xem toàn bộ dữ liệu"):
@@ -451,14 +460,34 @@ def main():
     else:
         st.success("Dữ liệu đầu vào có đủ các cột bắt buộc: date, sales")
 
-    with st.spinner("Đang train mô hình dự báo..."):
+    with st.spinner("Đang đọc kết quả dự báo từ mô hình LSTM..."):
         try:
-            result = train_forecast_model(df, lookback=lookback)
-        except Exception as e:
-            st.error(f"Lỗi train model: {e}")
-            return
+            forecast_df = pd.read_csv("forecast_result.csv")
+            forecast_df["date"] = pd.to_datetime(forecast_df["date"])
 
-    forecast_df = forecast_next_days(result, days_ahead=forecast_days)
+            lstm_test_df = pd.read_csv("lstm_test_result.csv")
+            lstm_metrics_df = pd.read_csv("lstm_metrics.csv")
+
+            y_true_lstm = lstm_test_df["y_true"].values
+            y_pred_lstm = lstm_test_df["y_pred"].values
+            lstm_mape = float(lstm_metrics_df.loc[lstm_metrics_df["metric"] == "MAPE", "value"].iloc[0])
+
+            if scenario == "Tết":
+                forecast_df["sales"] = (forecast_df["sales"] * 1.25).round().astype(int)
+
+            elif scenario == "Mưa lũ HCMC":
+                forecast_df["sales"] = (forecast_df["sales"] * 1.10).round().astype(int)
+                lead_time_days = lead_time_days + 2
+
+        except Exception as e:
+            st.error(f"Lỗi đọc file kết quả LSTM: {e}")
+            return
+    if using_uploaded_data:
+        st.warning(
+            "Bạn đang upload dữ liệu mới. Forecast, MAPE và biểu đồ test hiện tại vẫn đang lấy từ mô hình LSTM đã train trước đó trên bộ dữ liệu gốc."
+        )
+    else:
+        st.success("App đang dùng đúng bộ dữ liệu gốc khớp với mô hình LSTM đã train.")
 
     inv = calculate_inventory_metrics(
         historical_sales=df["sales"],
@@ -469,13 +498,15 @@ def main():
         holding_cost=holding_cost,
     ) 
 
-    st.subheader("3) Kết quả chính")
+    st.subheader("3) Kết quả AI Forecast & Inventory Optimization")
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("MAPE", f"{result['mape']:.2f}%")
+    c1.metric("MAPE", f"{lstm_mape:.2f}%")
     c2.metric("Nhu cầu TB/ngày", f"{inv.avg_daily_demand:.0f}")
     c3.metric("Safety Stock", f"{inv.safety_stock:.0f}")
     c4.metric("Reorder Point", f"{inv.reorder_point:.0f}")
     c5.metric("EOQ", f"{inv.eoq:.0f}")
+
+    st.info("Hệ thống xuất ra nhu cầu dự báo, mức tồn kho an toàn, điểm đặt hàng lại và lượng đặt hàng kinh tế.")
 
     st.subheader("4) Cảnh báo tồn kho thông minh")
     current_stock = st.number_input(
@@ -507,6 +538,7 @@ def main():
 
     st.subheader("5) Bảng dự báo")
     display_forecast = forecast_df.copy()
+    display_forecast["date"] = display_forecast["date"].astype(str)
     display_forecast["sales"] = display_forecast["sales"].round(0).astype(int)
     st.dataframe(display_forecast, use_container_width=True)
 
@@ -519,32 +551,32 @@ def main():
 
     st.subheader("6) Biểu đồ")
     plot_actual_vs_forecast(df, forecast_df)
-    plot_train_result(result["y_true"], result["y_pred"])
+    plot_train_result(y_true_lstm, y_pred_lstm)
 
     st.subheader("7) Giải thích nhanh")
     st.markdown(
         f"""
-**Mô hình dùng gì?**  
-- Dùng mô hình dự báo để học từ dữ liệu bán hàng lịch sử và dự báo nhu cầu trong **{forecast_days} ngày tới**.
+**Mô hình AI sử dụng:**  
+- Dùng **TensorFlow LSTM (50 units)** để dự báo chuỗi thời gian nhu cầu bán hàng.  
+- Mô hình được **train trên Google Colab** và kết quả được đưa vào Streamlit dashboard để demo.
 
-**Cảnh báo thông minh hoạt động ra sao?**  
-- So sánh tồn kho hiện tại với **Safety Stock** và **Reorder Point**.  
-- Nếu dưới Safety Stock → cảnh báo nguy hiểm.  
-- Nếu dưới Reorder Point → gợi ý nhập hàng.  
-- Nếu tồn quá cao so với nhu cầu dự báo → cảnh báo dư hàng.
+**Input của mô hình:**  
+- Lịch sử bán hàng theo ngày  
+- Yếu tố mùa vụ / ngày trong tuần  
+- Biến thời tiết và ngày lễ trong dữ liệu train
 
-**EOQ dùng để làm gì?**  
-- Ước lượng lượng đặt hàng kinh tế để giảm tổng chi phí đặt hàng và lưu kho.
+**Output của hệ thống:**  
+- Nhu cầu dự báo trong các ngày tới  
+- **Safety Stock** đề xuất  
+- **Reorder Point** tối ưu  
+- **EOQ** hỗ trợ quyết định nhập hàng
+
+**Kịch bản mô phỏng hiện tại:**  
+- **{scenario}**
+
+**Độ chính xác hiện tại:**  
+- **MAPE = {lstm_mape:.2f}%**
         """
-    )
-
-    st.subheader("8) Mẫu CSV hợp lệ")
-    st.code(
-        "date,sales,temperature,holiday\n"
-        "2025-01-01,120,30,0\n"
-        "2025-01-02,135,31,0\n"
-        "2025-01-03,160,29,1",
-        language="csv",
     )
 
 
