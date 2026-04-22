@@ -5,4 +5,4 @@ matplotlib
 scikit-learn
 plotly
 joblib
-tensorflow
+tensorflow==2.16.1
