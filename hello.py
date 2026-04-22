@@ -2,19 +2,16 @@ import os
 import math
 import warnings
 from dataclasses import dataclass
-
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
-import json
-import joblib
 
 from tensorflow.keras.models import load_model, Sequential
 from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_percentage_error
-from sklearn.linear_model import LinearRegression
+
 warnings.filterwarnings("ignore")
 
 CSV_PATH = "sales_data.csv"
@@ -117,230 +114,6 @@ def create_sequences(feature_array: np.ndarray, target_array: np.ndarray, lookba
         X.append(feature_array[i - lookback:i])
         y.append(target_array[i])
     return np.array(X), np.array(y)
-
-
-def train_forecast_model(df: pd.DataFrame, lookback: int = MODEL_LOOKBACK):
-    data = make_features(df)
-
-    feature_cols = ["sales", "temperature", "holiday", "day_of_week", "month", "is_weekend"]
-    features = data[feature_cols].astype(float)
-    target = data[["sales"]].astype(float)
-
-    feature_scaler = MinMaxScaler()
-    target_scaler = MinMaxScaler()
-
-    features_scaled = feature_scaler.fit_transform(features)
-    target_scaled = target_scaler.fit_transform(target)
-
-    X, y = create_sequences(features_scaled, target_scaled, lookback)
-
-    if len(X) < 10:
-        raise ValueError("Dữ liệu quá ít để train model. Hãy tăng số dòng dữ liệu.")
-
-    X_flat = X.reshape(X.shape[0], -1)
-    y_flat = y.ravel()
-
-    split_idx = int(len(X_flat) * 0.8)
-    X_train, X_test = X_flat[:split_idx], X_flat[split_idx:]
-    y_train, y_test = y_flat[:split_idx], y_flat[split_idx:]
-
-    model = LinearRegression()
-    model.fit(X_train, y_train)
-
-    y_pred_scaled = model.predict(X_test).reshape(-1, 1)
-    y_test_scaled = y_test.reshape(-1, 1)
-
-    y_pred = target_scaler.inverse_transform(y_pred_scaled)
-    y_true = target_scaler.inverse_transform(y_test_scaled)
-    mape = mean_absolute_percentage_error(y_true, y_pred) * 100
-
-    return {
-        "model": model,
-        "feature_scaler": feature_scaler,
-        "target_scaler": target_scaler,
-        "feature_cols": feature_cols,
-        "data": data,
-        "mape": mape,
-        "X_test": X_test,
-        "y_true": y_true.flatten(),
-        "y_pred": y_pred.flatten(),
-        "lookback": lookback,
-    }
-
-
-def forecast_next_days(train_result: dict, days_ahead: int = 7) -> pd.DataFrame:
-    model = train_result["model"]
-    data = train_result["data"].copy()
-    feature_scaler = train_result["feature_scaler"]
-    target_scaler = train_result["target_scaler"]
-    feature_cols = train_result["feature_cols"]
-    lookback = train_result["lookback"]
-
-    recent_data = data.tail(lookback).copy()
-    forecast_rows = []
-
-    for _ in range(days_ahead):
-        seq_features = recent_data[feature_cols].astype(float)
-        seq_scaled = feature_scaler.transform(seq_features)
-        seq_flat = seq_scaled.reshape(1, -1)
-
-        pred_scaled = model.predict(seq_flat).reshape(-1, 1)
-        pred_sales = target_scaler.inverse_transform(pred_scaled)[0][0]
-        pred_sales = max(20, float(pred_sales))
-
-        next_date = recent_data["date"].max() + pd.Timedelta(days=1)
-        next_day_of_week = next_date.dayofweek
-        next_month = next_date.month
-        next_is_weekend = int(next_day_of_week >= 5)
-
-        last_temp = float(recent_data["temperature"].iloc[-1])
-        next_temp = last_temp + np.random.normal(0, 0.5)
-        next_holiday = 0
-
-        new_row = pd.DataFrame({
-            "date": [next_date],
-            "sales": [pred_sales],
-            "temperature": [next_temp],
-            "holiday": [next_holiday],
-            "day_of_week": [next_day_of_week],
-            "month": [next_month],
-            "is_weekend": [next_is_weekend],
-        })
-
-        forecast_rows.append(new_row[["date", "sales"]])
-        recent_data = pd.concat([recent_data, new_row], ignore_index=True).tail(lookback)
-
-    forecast_df = pd.concat(forecast_rows, ignore_index=True)
-    forecast_df["sales"] = forecast_df["sales"].round(0)
-    return forecast_df
-
-def load_saved_lstm_artifacts():
-    model = load_model("lstm_model.keras")
-    feature_scaler = joblib.load("feature_scaler.pkl")
-    target_scaler = joblib.load("target_scaler.pkl")
-
-    with open("model_config.json", "r", encoding="utf-8") as f:
-        config = json.load(f)
-
-    return {
-        "model": model,
-        "feature_scaler": feature_scaler,
-        "target_scaler": target_scaler,
-        "lookback": config["lookback"],
-        "feature_cols": config["feature_cols"],
-        "target_col": config["target_col"],
-    }
-def forecast_with_saved_lstm(df: pd.DataFrame, days_ahead: int = 7):
-    artifacts = load_saved_lstm_artifacts()
-
-    model = artifacts["model"]
-    feature_scaler = artifacts["feature_scaler"]
-    target_scaler = artifacts["target_scaler"]
-    lookback = artifacts["lookback"]
-    feature_cols = artifacts["feature_cols"]
-
-    data = df.copy()
-
-    if "temperature" not in data.columns:
-        data["temperature"] = 30
-    if "holiday" not in data.columns:
-        data["holiday"] = 0
-
-    data["day_of_week"] = data["date"].dt.dayofweek
-    data["month"] = data["date"].dt.month
-    data["is_weekend"] = (data["day_of_week"] >= 5).astype(int)
-
-    recent_window = data.tail(lookback).copy()
-    forecast_rows = []
-
-    for _ in range(days_ahead):
-        window_features = recent_window[feature_cols].astype(float)
-        window_scaled = feature_scaler.transform(window_features)
-        X_input = window_scaled.reshape(1, lookback, len(feature_cols))
-
-        pred_scaled = model.predict(X_input, verbose=0)
-        pred_sales = target_scaler.inverse_transform(pred_scaled)[0][0]
-        pred_sales = max(20, float(pred_sales))
-
-        next_date = recent_window["date"].max() + pd.Timedelta(days=1)
-        next_day_of_week = next_date.dayofweek
-        next_month = next_date.month
-        next_is_weekend = int(next_day_of_week >= 5)
-
-        last_temp = float(recent_window["temperature"].iloc[-1])
-        next_temp = last_temp
-        next_holiday = 0
-
-        new_row = pd.DataFrame({
-            "date": [next_date],
-            "sales": [pred_sales],
-            "temperature": [next_temp],
-            "holiday": [next_holiday],
-            "day_of_week": [next_day_of_week],
-            "month": [next_month],
-            "is_weekend": [next_is_weekend],
-        })
-
-        forecast_rows.append({
-            "date": next_date,
-            "sales": round(pred_sales)
-        })
-
-        recent_window = pd.concat([recent_window, new_row], ignore_index=True).tail(lookback)
-
-    forecast_df = pd.DataFrame(forecast_rows)
-    return forecast_df
-def evaluate_saved_lstm_on_df(df: pd.DataFrame):
-    artifacts = load_saved_lstm_artifacts()
-
-    model = artifacts["model"]
-    feature_scaler = artifacts["feature_scaler"]
-    target_scaler = artifacts["target_scaler"]
-    lookback = artifacts["lookback"]
-    feature_cols = artifacts["feature_cols"]
-
-    data = df.copy()
-
-    if "temperature" not in data.columns:
-        data["temperature"] = 30
-    if "holiday" not in data.columns:
-        data["holiday"] = 0
-
-    data["day_of_week"] = data["date"].dt.dayofweek
-    data["month"] = data["date"].dt.month
-    data["is_weekend"] = (data["day_of_week"] >= 5).astype(int)
-
-    for col in feature_cols:
-        data[col] = pd.to_numeric(data[col], errors="coerce")
-
-    data = data.dropna(subset=["sales"]).reset_index(drop=True)
-
-    features_scaled = feature_scaler.transform(data[feature_cols].astype(float))
-    target_scaled = target_scaler.transform(data[["sales"]].astype(float))
-
-    X, y = [], []
-    for i in range(lookback, len(data)):
-        X.append(features_scaled[i-lookback:i])
-        y.append(target_scaled[i])
-
-    X = np.array(X)
-    y = np.array(y)
-
-    split_idx = int(len(X) * 0.8)
-    X_test = X[split_idx:]
-    y_test = y[split_idx:]
-
-    y_pred_scaled = model.predict(X_test, verbose=0)
-    y_pred = target_scaler.inverse_transform(y_pred_scaled).flatten()
-    y_true = target_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
-
-    mape = mean_absolute_percentage_error(y_true, y_pred) * 100
-
-    return {
-        "y_true": y_true,
-        "y_pred": y_pred,
-        "mape": mape
-    }
 
 def train_lstm_on_uploaded_df(df: pd.DataFrame, lookback: int = 14, forecast_days: int = 7):
     data = df.copy()
@@ -653,7 +426,7 @@ def main():
     st.sidebar.header("Cấu hình mô phỏng")
     lookback = st.sidebar.slider("Số ngày nhìn lại (lookback)", 7, 30, 14)
     forecast_days = st.sidebar.slider("Số ngày muốn dự báo", 7, 30, 7)
-    st.sidebar.caption("Nếu upload file mới, app sẽ train lại nhanh theo file đó. Nếu không upload, app dùng bộ LSTM đã train sẵn.")
+    st.sidebar.caption("Nếu upload file mới, app sẽ train lại LSTM theo file đó. Nếu không upload, app dùng kết quả LSTM đã train sẵn.")
     lead_time_days = st.sidebar.slider("Lead time (ngày)", 1, 30, 7)
     z_value = st.sidebar.selectbox("Mức độ an toàn (Z-score)", [1.28, 1.65, 1.96, 2.33], index=1)
     order_cost = st.sidebar.number_input("Chi phí mỗi lần đặt hàng", value=500000, step=50000)
@@ -813,9 +586,8 @@ def main():
     st.markdown(
     f"""
 **Mô hình AI sử dụng:**  
-- Nếu **không upload file mới**, app dùng **TensorFlow LSTM (50 units)** đã train trên Google Colab.  
+- Nếu **không upload file mới**, app dùng **kết quả từ TensorFlow LSTM (50 units)** đã train trên Google Colab.  
 - Nếu **upload file mới**, app sẽ **train lại LSTM trực tiếp trên file upload** để tạo forecast phù hợp hơn với dữ liệu đó.
-
 **Input của mô hình:**  
 - Lịch sử bán hàng theo ngày  
 - Yếu tố mùa vụ / ngày trong tuần  
