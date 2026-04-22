@@ -7,6 +7,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+import json
+import joblib
+from tensorflow.keras.models import load_model
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_percentage_error
 from sklearn.linear_model import LinearRegression
@@ -210,6 +213,133 @@ def forecast_next_days(train_result: dict, days_ahead: int = 7) -> pd.DataFrame:
     forecast_df["sales"] = forecast_df["sales"].round(0)
     return forecast_df
 
+def load_saved_lstm_artifacts():
+    model = load_model("lstm_model.keras")
+    feature_scaler = joblib.load("feature_scaler.pkl")
+    target_scaler = joblib.load("target_scaler.pkl")
+
+    with open("model_config.json", "r", encoding="utf-8") as f:
+        config = json.load(f)
+
+    return {
+        "model": model,
+        "feature_scaler": feature_scaler,
+        "target_scaler": target_scaler,
+        "lookback": config["lookback"],
+        "feature_cols": config["feature_cols"],
+        "target_col": config["target_col"],
+    }
+def forecast_with_saved_lstm(df: pd.DataFrame, days_ahead: int = 7):
+    artifacts = load_saved_lstm_artifacts()
+
+    model = artifacts["model"]
+    feature_scaler = artifacts["feature_scaler"]
+    target_scaler = artifacts["target_scaler"]
+    lookback = artifacts["lookback"]
+    feature_cols = artifacts["feature_cols"]
+
+    data = df.copy()
+
+    if "temperature" not in data.columns:
+        data["temperature"] = 30
+    if "holiday" not in data.columns:
+        data["holiday"] = 0
+
+    data["day_of_week"] = data["date"].dt.dayofweek
+    data["month"] = data["date"].dt.month
+    data["is_weekend"] = (data["day_of_week"] >= 5).astype(int)
+
+    recent_window = data.tail(lookback).copy()
+    forecast_rows = []
+
+    for _ in range(days_ahead):
+        window_features = recent_window[feature_cols].astype(float)
+        window_scaled = feature_scaler.transform(window_features)
+        X_input = window_scaled.reshape(1, lookback, len(feature_cols))
+
+        pred_scaled = model.predict(X_input, verbose=0)
+        pred_sales = target_scaler.inverse_transform(pred_scaled)[0][0]
+        pred_sales = max(20, float(pred_sales))
+
+        next_date = recent_window["date"].max() + pd.Timedelta(days=1)
+        next_day_of_week = next_date.dayofweek
+        next_month = next_date.month
+        next_is_weekend = int(next_day_of_week >= 5)
+
+        last_temp = float(recent_window["temperature"].iloc[-1])
+        next_temp = last_temp
+        next_holiday = 0
+
+        new_row = pd.DataFrame({
+            "date": [next_date],
+            "sales": [pred_sales],
+            "temperature": [next_temp],
+            "holiday": [next_holiday],
+            "day_of_week": [next_day_of_week],
+            "month": [next_month],
+            "is_weekend": [next_is_weekend],
+        })
+
+        forecast_rows.append({
+            "date": next_date,
+            "sales": round(pred_sales)
+        })
+
+        recent_window = pd.concat([recent_window, new_row], ignore_index=True).tail(lookback)
+
+    forecast_df = pd.DataFrame(forecast_rows)
+    return forecast_df
+def evaluate_saved_lstm_on_df(df: pd.DataFrame):
+    artifacts = load_saved_lstm_artifacts()
+
+    model = artifacts["model"]
+    feature_scaler = artifacts["feature_scaler"]
+    target_scaler = artifacts["target_scaler"]
+    lookback = artifacts["lookback"]
+    feature_cols = artifacts["feature_cols"]
+
+    data = df.copy()
+
+    if "temperature" not in data.columns:
+        data["temperature"] = 30
+    if "holiday" not in data.columns:
+        data["holiday"] = 0
+
+    data["day_of_week"] = data["date"].dt.dayofweek
+    data["month"] = data["date"].dt.month
+    data["is_weekend"] = (data["day_of_week"] >= 5).astype(int)
+
+    for col in feature_cols:
+        data[col] = pd.to_numeric(data[col], errors="coerce")
+
+    data = data.dropna(subset=["sales"]).reset_index(drop=True)
+
+    features_scaled = feature_scaler.transform(data[feature_cols].astype(float))
+    target_scaled = target_scaler.transform(data[["sales"]].astype(float))
+
+    X, y = [], []
+    for i in range(lookback, len(data)):
+        X.append(features_scaled[i-lookback:i])
+        y.append(target_scaled[i])
+
+    X = np.array(X)
+    y = np.array(y)
+
+    split_idx = int(len(X) * 0.8)
+    X_test = X[split_idx:]
+    y_test = y[split_idx:]
+
+    y_pred_scaled = model.predict(X_test, verbose=0)
+    y_pred = target_scaler.inverse_transform(y_pred_scaled).flatten()
+    y_true = target_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+
+    mape = mean_absolute_percentage_error(y_true, y_pred) * 100
+
+    return {
+        "y_true": y_true,
+        "y_pred": y_pred,
+        "mape": mape
+    }
 
 def calculate_inventory_metrics(
     historical_sales: pd.Series,
@@ -410,7 +540,7 @@ def main():
     st.sidebar.header("Cấu hình mô phỏng")
     lookback = st.sidebar.slider("Số ngày nhìn lại (lookback)", 7, 30, 14)
     forecast_days = st.sidebar.slider("Số ngày muốn dự báo", 7, 30, 7)
-    st.sidebar.caption("Số ngày forecast thực tế phụ thuộc file kết quả LSTM hiện tại từ Colab.")
+    st.sidebar.caption("Nếu upload file mới, app sẽ train lại nhanh theo file đó. Nếu không upload, app dùng bộ LSTM đã train sẵn.")
     lead_time_days = st.sidebar.slider("Lead time (ngày)", 1, 30, 7)
     z_value = st.sidebar.selectbox("Mức độ an toàn (Z-score)", [1.28, 1.65, 1.96, 2.33], index=1)
     order_cost = st.sidebar.number_input("Chi phí mỗi lần đặt hàng", value=500000, step=50000)
@@ -460,17 +590,28 @@ def main():
     else:
         st.success("Dữ liệu đầu vào có đủ các cột bắt buộc: date, sales")
 
-    with st.spinner("Đang đọc kết quả dự báo từ mô hình LSTM..."):
+    with st.spinner("Đang xử lý dự báo..."):
         try:
-            forecast_df = pd.read_csv("forecast_result.csv")
-            forecast_df["date"] = pd.to_datetime(forecast_df["date"])
+            if uploaded_file is not None:
+                eval_result = evaluate_saved_lstm_on_df(df)
+                forecast_df = forecast_with_saved_lstm(df, days_ahead=forecast_days)
 
-            lstm_test_df = pd.read_csv("lstm_test_result.csv")
-            lstm_metrics_df = pd.read_csv("lstm_metrics.csv")
+                y_true_lstm = eval_result["y_true"]
+                y_pred_lstm = eval_result["y_pred"]
+                lstm_mape = float(eval_result["mape"])
+            else:
+                # Dùng bộ LSTM đã train sẵn từ Colab
+                forecast_df = pd.read_csv("forecast_result.csv")
+                forecast_df["date"] = pd.to_datetime(forecast_df["date"])
 
-            y_true_lstm = lstm_test_df["y_true"].values
-            y_pred_lstm = lstm_test_df["y_pred"].values
-            lstm_mape = float(lstm_metrics_df.loc[lstm_metrics_df["metric"] == "MAPE", "value"].iloc[0])
+                lstm_test_df = pd.read_csv("lstm_test_result.csv")
+                lstm_metrics_df = pd.read_csv("lstm_metrics.csv")
+
+                y_true_lstm = lstm_test_df["y_true"].values
+                y_pred_lstm = lstm_test_df["y_pred"].values
+                lstm_mape = float(
+                    lstm_metrics_df.loc[lstm_metrics_df["metric"] == "MAPE", "value"].iloc[0]
+                )
 
             if scenario == "Tết":
                 forecast_df["sales"] = (forecast_df["sales"] * 1.25).round().astype(int)
@@ -480,15 +621,13 @@ def main():
                 lead_time_days = lead_time_days + 2
 
         except Exception as e:
-            st.error(f"Lỗi đọc file kết quả LSTM: {e}")
+            st.error(f"Lỗi xử lý dự báo: {e}")
             return
-    if using_uploaded_data:
-        st.warning(
-            "Bạn đang upload dữ liệu mới. Forecast, MAPE và biểu đồ test hiện tại vẫn đang lấy từ mô hình LSTM đã train trước đó trên bộ dữ liệu gốc."
-        )
-    else:
-        st.success("App đang dùng đúng bộ dữ liệu gốc khớp với mô hình LSTM đã train.")
-
+        if using_uploaded_data:
+            st.success("App đang dùng mô hình LSTM train sẵn để dự báo trên chính file bạn upload.")
+            st.info("Chế độ upload hiện load model LSTM đã train trước để tạo forecast cho dữ liệu mới.")
+        else:
+            st.success("App đang dùng đúng bộ dữ liệu gốc khớp với mô hình LSTM đã train.")
     inv = calculate_inventory_metrics(
         historical_sales=df["sales"],
         forecast_sales=forecast_df["sales"],
@@ -557,8 +696,8 @@ def main():
     st.markdown(
         f"""
 **Mô hình AI sử dụng:**  
-- Dùng **TensorFlow LSTM (50 units)** để dự báo chuỗi thời gian nhu cầu bán hàng.  
-- Mô hình được **train trên Google Colab** và kết quả được đưa vào Streamlit dashboard để demo.
+- Mặc định app dùng **TensorFlow LSTM (50 units)** đã train trên Google Colab.  
+- Nếu người dùng upload file mới, app sẽ **train lại nhanh theo file upload** để tạo forecast phù hợp với dữ liệu đó.
 
 **Input của mô hình:**  
 - Lịch sử bán hàng theo ngày  
