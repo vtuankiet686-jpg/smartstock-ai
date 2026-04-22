@@ -170,7 +170,7 @@ def train_lstm_on_uploaded_df(df: pd.DataFrame, lookback: int = 14, forecast_day
 
     model.fit(
         X_train, y_train,
-        epochs=40,
+        epochs=30,
         batch_size=16,
         validation_split=0.1,
         verbose=0
