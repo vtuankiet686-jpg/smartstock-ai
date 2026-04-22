@@ -160,7 +160,9 @@ def train_lstm_on_uploaded_df(df: pd.DataFrame, lookback: int = 14, forecast_day
     y_train, y_test = y[:split_idx], y[split_idx:]
 
     model = Sequential([
-        LSTM(50, input_shape=(X_train.shape[1], X_train.shape[2])),
+        LSTM(64, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])),
+        LSTM(32),
+        Dense(16, activation="relu"),
         Dense(1)
     ])
 
@@ -168,7 +170,7 @@ def train_lstm_on_uploaded_df(df: pd.DataFrame, lookback: int = 14, forecast_day
 
     model.fit(
         X_train, y_train,
-        epochs=20,
+        epochs=40,
         batch_size=16,
         validation_split=0.1,
         verbose=0
@@ -424,8 +426,8 @@ def main():
     st.caption("Forecast và kết quả đánh giá được sinh từ mô hình TensorFlow LSTM (50 units) train trên Google Colab.")
 
     st.sidebar.header("Cấu hình mô phỏng")
-    lookback = st.sidebar.slider("Số ngày nhìn lại (lookback)", 7, 30, 14)
-    forecast_days = st.sidebar.slider("Số ngày muốn dự báo", 7, 30, 7)
+    lookback = st.sidebar.slider("Số ngày nhìn lại (lookback)", 7, 30, 30)
+    forecast_days = st.sidebar.slider("Số ngày muốn dự báo", 7, 30, 14)
     st.sidebar.caption("Nếu upload file mới, app sẽ train lại LSTM theo file đó. Nếu không upload, app dùng kết quả LSTM đã train sẵn.")
     lead_time_days = st.sidebar.slider("Lead time (ngày)", 1, 30, 7)
     z_value = st.sidebar.selectbox("Mức độ an toàn (Z-score)", [1.28, 1.65, 1.96, 2.33], index=1)
