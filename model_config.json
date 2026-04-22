@@ -1,0 +1,12 @@
+{
+  "lookback": 14,
+  "feature_cols": [
+    "sales",
+    "temperature",
+    "holiday",
+    "day_of_week",
+    "month",
+    "is_weekend"
+  ],
+  "target_col": "sales"
+}
