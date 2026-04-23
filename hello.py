@@ -443,7 +443,7 @@ def main():
     uploaded_file = st.file_uploader(
         "Tải file CSV của bạn lên",
         type=["csv"],
-        help="CSV tối thiểu cần có cột: date, sales. Có thể thêm temperature, holiday."
+        help="CSV tối thiểu cần có cột: date, sales. Có thể thêm temperature, holiday, current_stock."
     )
 
 
@@ -540,8 +540,12 @@ def main():
     st.info("Hệ thống xuất ra nhu cầu dự báo, mức tồn kho an toàn, điểm đặt hàng lại và lượng đặt hàng kinh tế.")
 
     st.subheader("4) Cảnh báo tồn kho thông minh")
-    current_stock = st.number_input(
-        "Nhập mức tồn kho hiện tại",
+    if "current_stock" in df.columns:
+        current_stock = int(pd.to_numeric(df["current_stock"], errors="coerce").dropna().iloc[-1])
+        st.info(f"Tồn kho hiện tại được lấy từ file dữ liệu: {current_stock}")
+    else:
+        current_stock = st.number_input(
+            "Nhập mức tồn kho hiện tại",
         min_value=0,
         value=int(max(inv.reorder_point, inv.safety_stock) + 20),
         step=10
