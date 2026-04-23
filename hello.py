@@ -137,6 +137,10 @@ def train_lstm_on_uploaded_df(df: pd.DataFrame, lookback: int = 14, forecast_day
         data[col] = pd.to_numeric(data[col], errors="coerce")
 
     data = data.dropna(subset=["sales"]).reset_index(drop=True)
+    if len(data) > 180:
+        data = data.tail(180).copy().reset_index(drop=True)
+    recent_boost = data.tail(45).copy()
+    data = pd.concat([data, recent_boost, recent_boost, recent_boost], ignore_index=True)
 
     if len(data) <= lookback + 10:
         raise ValueError("File upload quá ít dữ liệu để train LSTM. Cần nhiều hơn nữa.")
@@ -159,10 +163,18 @@ def train_lstm_on_uploaded_df(df: pd.DataFrame, lookback: int = 14, forecast_day
     X_train, X_test = X[:split_idx], X[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
 
+    data = data.dropna(subset=["sales"]).reset_index(drop=True)
+
+    if len(data) > 180:
+        data = data.tail(180).copy().reset_index(drop=True)
+
+    recent_boost = data.tail(45).copy()
+    data = pd.concat([data, recent_boost, recent_boost, recent_boost], ignore_index=True)
+
     model = Sequential([
-        LSTM(64, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])),
-        LSTM(32),
-        Dense(16, activation="relu"),
+        LSTM(96, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])),
+        LSTM(64),
+        Dense(32, activation="relu"),
         Dense(1)
     ])
 
@@ -170,7 +182,7 @@ def train_lstm_on_uploaded_df(df: pd.DataFrame, lookback: int = 14, forecast_day
 
     model.fit(
         X_train, y_train,
-        epochs=30,
+        epochs=70,
         batch_size=16,
         validation_split=0.1,
         verbose=0
@@ -254,32 +266,69 @@ def calculate_inventory_metrics(
         eoq=eoq,
     )
 
-
-def evaluate_inventory_status(current_stock: float, inv: InventoryResult, forecast_df: pd.DataFrame):
+def evaluate_inventory_status(
+    current_stock: float,
+    inv: InventoryResult,
+    forecast_df: pd.DataFrame,
+    warehouse_capacity: float
+):
     next_7_days_demand = float(forecast_df["sales"].sum())
     stock_gap_vs_rop = current_stock - inv.reorder_point
+    days_of_cover = current_stock / inv.avg_daily_demand if inv.avg_daily_demand > 0 else 0
+    stock_utilization = current_stock / warehouse_capacity if warehouse_capacity > 0 else 0
     suggested_order_qty = max(0, math.ceil(inv.eoq if current_stock < inv.reorder_point else 0))
+
+    forecast_values = forecast_df["sales"].astype(float).values
+
+    if len(forecast_values) >= 2:
+        trend_delta = forecast_values[-1] - forecast_values[0]
+        trend_ratio = trend_delta / max(forecast_values[0], 1)
+    else:
+        trend_delta = 0
+        trend_ratio = 0
+
+    trend_up = trend_ratio > 0.08
+    trend_down = trend_ratio < -0.08
+
+    # Dùng forecast nhiều hơn
+    future_avg = float(np.mean(forecast_values)) if len(forecast_values) > 0 else 0
+    future_peak = float(np.max(forecast_values)) if len(forecast_values) > 0 else 0
 
     if current_stock < inv.safety_stock:
         status = "Nguy hiểm"
         priority = "Cao"
         color = "error"
         message = "Tồn kho hiện tại thấp hơn mức tồn kho an toàn. Nguy cơ thiếu hàng rất cao."
+
+    elif trend_up and (days_of_cover < 8 or current_stock < future_peak * 6):
+        status = "Cần nhập hàng"
+        priority = "Trung bình"
+        color = "warning"
+        message = "Nhu cầu dự báo đang tăng rõ trong tương lai. Nên lên kế hoạch nhập hàng sớm."
+
     elif current_stock < inv.reorder_point:
         status = "Cần nhập hàng"
         priority = "Trung bình"
         color = "warning"
         message = "Tồn kho hiện tại đã thấp hơn điểm đặt hàng lại. Nên lên đơn nhập thêm."
-    elif current_stock > next_7_days_demand * 1.5 + inv.safety_stock:
+
+    elif trend_down and current_stock > future_avg * 14:
+        status = "Nguy cơ dư hàng"
+        priority = "Trung bình"
+        color = "warning"
+        message = "Nhu cầu dự báo đang giảm trong khi tồn kho hiện tại còn cao. Có nguy cơ dư hàng."
+
+    elif current_stock > next_7_days_demand * 1.35 + inv.safety_stock:
         status = "Nguy cơ dư hàng"
         priority = "Trung bình"
         color = "warning"
         message = "Tồn kho hiện tại khá cao so với nhu cầu dự báo. Có nguy cơ dư hàng hoặc quay vòng chậm."
+
     else:
         status = "An toàn"
         priority = "Thấp"
         color = "success"
-        message = "Tồn kho đang ở mức hợp lý so với nhu cầu dự báo."
+        message = "Tồn kho đang ở mức hợp lý so với nhu cầu dự báo tương lai."
 
     return {
         "status": status,
@@ -289,7 +338,10 @@ def evaluate_inventory_status(current_stock: float, inv: InventoryResult, foreca
         "next_7_days_demand": next_7_days_demand,
         "stock_gap_vs_rop": stock_gap_vs_rop,
         "suggested_order_qty": suggested_order_qty,
-        "days_of_cover": current_stock / inv.avg_daily_demand if inv.avg_daily_demand > 0 else 0,
+        "days_of_cover": days_of_cover,
+        "trend_delta": trend_delta,
+        "trend_ratio": trend_ratio,
+        "stock_utilization": stock_utilization,
     }
 
 def plot_actual_vs_forecast(df: pd.DataFrame, forecast_df: pd.DataFrame):
@@ -426,13 +478,19 @@ def main():
     st.caption("Forecast và kết quả đánh giá được sinh từ mô hình TensorFlow LSTM (50 units) train trên Google Colab.")
 
     st.sidebar.header("Cấu hình mô phỏng")
-    lookback = st.sidebar.slider("Số ngày nhìn lại (lookback)", 7, 30, 30)
+    lookback = st.sidebar.slider("Số ngày nhìn lại (lookback)", 7, 30, 21)
     forecast_days = st.sidebar.slider("Số ngày muốn dự báo", 7, 30, 14)
     st.sidebar.caption("Nếu upload file mới, app sẽ train lại LSTM theo file đó. Nếu không upload, app dùng kết quả LSTM đã train sẵn.")
     lead_time_days = st.sidebar.slider("Lead time (ngày)", 1, 30, 7)
     z_value = st.sidebar.selectbox("Mức độ an toàn (Z-score)", [1.28, 1.65, 1.96, 2.33], index=1)
     order_cost = st.sidebar.number_input("Chi phí mỗi lần đặt hàng", value=500000, step=50000)
     holding_cost = st.sidebar.number_input("Chi phí lưu kho / đơn vị / năm", value=12000, step=1000)
+    warehouse_capacity = st.sidebar.number_input(
+    "Sức chứa tối đa của kho",
+    min_value=1,
+    value=3000,
+    step=100
+)
     scenario = st.sidebar.selectbox(
         "Kịch bản mô phỏng",
         ["Bình thường", "Tết", "Mưa lũ HCMC"],
@@ -551,7 +609,7 @@ def main():
         step=10
     )
 
-    alert = evaluate_inventory_status(current_stock, inv, forecast_df)
+    alert = evaluate_inventory_status(current_stock, inv, forecast_df, warehouse_capacity)
 
     if alert["color"] == "error":
         st.error(f"**{alert['status']}** — {alert['message']}")
@@ -559,12 +617,20 @@ def main():
         st.warning(f"**{alert['status']}** — {alert['message']}")
     else:
         st.success(f"**{alert['status']}** — {alert['message']}")
+    
+    if alert["trend_ratio"] > 0.10:
+        st.info("Xu hướng forecast: đang tăng rõ.")
+    elif alert["trend_ratio"] < -0.10:
+        st.info("Xu hướng forecast: đang giảm rõ.")
+    else:
+        st.info("Xu hướng forecast: tương đối ổn định.")
 
-    a1, a2, a3, a4 = st.columns(4)
+    a1, a2, a3, a4, a5 = st.columns(5)
     a1.metric("Mức ưu tiên", alert["priority"])
     a2.metric("Số ngày đủ hàng", f"{alert['days_of_cover']:.1f} ngày")
     a3.metric("Nhu cầu dự báo", f"{alert['next_7_days_demand']:.0f}")
     a4.metric("Chênh lệch vs ROP", f"{alert['stock_gap_vs_rop']:.0f}")
+    a5.metric("Mức đầy kho", f"{alert['stock_utilization']*100:.0f}%")
 
     if alert["suggested_order_qty"] > 0:
         st.info(f"Gợi ý nhập thêm khoảng **{alert['suggested_order_qty']}** đơn vị theo EOQ.")
